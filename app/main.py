@@ -3,12 +3,12 @@ import httpx
 
 from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.responses import JSONResponse
-from sqlalchemy import text, delete
+from sqlalchemy import text, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db import engine, run_migrations, get_db
-from pokeapi_client import fetch_pokemon_list, fetch_pokemon_details
+from pokeapi_client import fetch_pokemon_list, fetch_pokemon_details, fetch_location_name_for_pokemon
 from models import Pokemon, PokemonType
 from utils import parse_limit_offset
 
@@ -214,4 +214,85 @@ async def save_pokemon(
         return JSONResponse(
             status_code=500,
             content={"error": "Failed to fetch or save Pokemon data"},
+        )
+
+@app.get("/pokemon/locations/enrich")
+async def enrich_pokemon_locations(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetches location area encounter data for all Pokemon in the database
+    by resolving their location_area_encounters URLs.
+
+    Updates the 'location_name' column with the actual location area names
+    from PokeAPI.
+
+    Success:
+      200, { "message": "Successfully enriched Pokemon location data",
+             "updated_count": N }
+
+    Failure:
+      500, { "error": "Failed to fetch or update Pokemon location data" }
+    """
+    try:
+        # 1) Get all Pokémon that have a non-null encounters URL.
+        #    (Optionally restrict to those with NULL location_name to avoid redoing work.)
+        result = await db.execute(
+            select(Pokemon).where(
+                Pokemon.location_area_encounters.is_not(None)
+            )
+        )
+        pokemons: list[Pokemon] = result.scalars().all()
+
+        if not pokemons:
+            return {
+                "message": "Successfully enriched Pokemon location data",
+                "updated_count": 0,
+            }
+
+        # 2) Fetch locations concurrently
+        async with httpx.AsyncClient() as client:
+            tasks = [
+                fetch_location_name_for_pokemon(
+                    client, p.location_area_encounters
+                )
+                for p in pokemons
+            ]
+            location_names = await asyncio.gather(*tasks)
+
+        # 3) Update DB
+        updated_count = 0
+
+        for p, loc_name in zip(pokemons, location_names):
+            if not loc_name:
+                # No encounters or fetch failure -> leave location_name as is
+                continue
+
+            if p.location_name == loc_name:
+                # Already up-to-date
+                continue
+
+            await db.execute(
+                update(Pokemon)
+                .where(Pokemon.pokemon_id == p.pokemon_id)
+                .values(location_name=loc_name)
+            )
+            updated_count += 1
+
+        await db.commit()
+
+        return {
+            "message": "Successfully enriched Pokemon location data",
+            "updated_count": updated_count,
+        }
+
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch or update Pokemon location data"},
         )

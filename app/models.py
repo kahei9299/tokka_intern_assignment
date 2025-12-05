@@ -35,6 +35,7 @@ class Pokemon(Base):
     weight: Mapped[int | None] = mapped_column(Integer)
     location_area_encounters: Mapped[str | None] = mapped_column(Text)
     # Relationship: one Pokemon → many types
+    location_name: Mapped[str | None] = mapped_column(Text)
     types: Mapped[list["PokemonType"]] = relationship(
         back_populates="pokemon",
         cascade="all, delete-orphan",

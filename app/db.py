@@ -83,3 +83,13 @@ async def run_migrations() -> None:
                 """
             )
         )
+        
+        # add location_name column if it doesn't exist
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE pokemon
+                ADD COLUMN IF NOT EXISTS location_name TEXT;
+                """
+            )
+        )
