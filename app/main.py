@@ -4,7 +4,7 @@ import httpx
 
 from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.responses import JSONResponse
-from sqlalchemy import text, delete, select, update
+from sqlalchemy import text, delete, select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -365,4 +365,121 @@ async def generate_pokemon_natures(
         return JSONResponse(
             status_code=500,
             content={"error": "Failed to assign natures"},
+        )
+
+@app.get("/pokemon/locations/by-type/{type}")
+async def get_locations_by_type(
+    type: str,
+    limit: str | None = None,
+    offset: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns location areas ranked by the number of Pokemon of the specified type
+    that can be encountered there.
+
+    Path params:
+      - type: Pokemon type (e.g. 'fairy', 'water'), case-insensitive.
+
+    Query params:
+      - limit: optional, default 10, must be 1–50
+      - offset: optional, default 0, must be >= 0
+
+    Error 400:
+      { "error": "Invalid Pokemon type, limit, or offset parameter" }
+
+    Error 500:
+      { "error": "Failed to fetch location data" }
+    """
+    # ---- Validate type and parse limit/offset ----
+    try:
+        type_value = type.strip().lower()
+        if not type_value:
+            # empty or whitespace-only type
+            raise ValueError("empty type")
+
+        # Reuse the same helper pattern as /pokemon/save
+        limit_value, offset_value = parse_limit_offset(
+            limit_str=limit,
+            offset_str=offset,
+            default_limit=10,
+            max_limit=50,
+        )
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid Pokemon type, limit, or offset parameter"},
+        )
+    # ------------------------------------------------
+
+    try:
+        # 1) Validate that this type exists in our data at all.
+        #    If no rows in pokemon_types with this type_name, treat as invalid type.
+        exists_stmt = select(func.count()).select_from(PokemonType).where(
+            PokemonType.type_name == type_value
+        )
+        exists_result = await db.execute(exists_stmt)
+        type_count = exists_result.scalar_one() or 0
+        if type_count == 0:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Invalid Pokemon type, limit, or offset parameter"},
+            )
+
+        # 2) Compute total_locations = number of distinct location_name
+        total_stmt = (
+            select(func.count(func.distinct(Pokemon.location_name)))
+            .join(PokemonType, PokemonType.pokemon_id == Pokemon.pokemon_id)
+            .where(
+                PokemonType.type_name == type_value,
+                Pokemon.location_name.is_not(None),
+            )
+        )
+        total_result = await db.execute(total_stmt)
+        total_locations = total_result.scalar_one() or 0
+
+        # 3) Fetch paginated locations with aggregated pokemon_count
+        locations_stmt = (
+            select(
+                Pokemon.location_name.label("location_name"),
+                func.count().label("pokemon_count"),
+            )
+            .join(PokemonType, PokemonType.pokemon_id == Pokemon.pokemon_id)
+            .where(
+                PokemonType.type_name == type_value,
+                Pokemon.location_name.is_not(None),
+            )
+            .group_by(Pokemon.location_name)
+            .order_by(
+                func.count().desc(),        # most Pokémon first
+                Pokemon.location_name.asc() # tie-breaker by name
+            )
+            .limit(limit_value)
+            .offset(offset_value)
+        )
+        locations_result = await db.execute(locations_stmt)
+        rows = locations_result.all()
+
+        locations = [
+            {
+                "location_name": row.location_name,
+                "pokemon_count": row.pokemon_count,
+            }
+            for row in rows
+        ]
+
+        # 4) Spec-compliant 200 response
+        return {
+            "type": type_value,
+            "total_locations": total_locations,
+            "limit": limit_value,
+            "offset": offset_value,
+            "locations": locations,
+        }
+
+    except Exception:
+        # Any unexpected DB failure → spec-compliant 500
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch location data"},
         )
