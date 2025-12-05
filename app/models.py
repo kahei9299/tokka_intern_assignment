@@ -36,6 +36,8 @@ class Pokemon(Base):
     location_area_encounters: Mapped[str | None] = mapped_column(Text)
     # Relationship: one Pokemon → many types
     location_name: Mapped[str | None] = mapped_column(Text)
+    
+    nature: Mapped[str | None] = mapped_column(Text)
     types: Mapped[list["PokemonType"]] = relationship(
         back_populates="pokemon",
         cascade="all, delete-orphan",

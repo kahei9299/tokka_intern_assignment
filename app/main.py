@@ -1,4 +1,5 @@
 import asyncio
+import random
 import httpx
 
 from fastapi import FastAPI, HTTPException, Query, Depends
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db import engine, run_migrations, get_db
-from pokeapi_client import fetch_pokemon_list, fetch_pokemon_details, fetch_location_name_for_pokemon
+from pokeapi_client import fetch_pokemon_list, fetch_pokemon_details, fetch_location_name_for_pokemon, fetch_all_natures
 from models import Pokemon, PokemonType
 from utils import parse_limit_offset
 
@@ -295,4 +296,73 @@ async def enrich_pokemon_locations(
         return JSONResponse(
             status_code=500,
             content={"error": "Failed to fetch or update Pokemon location data"},
+        )
+
+@app.get("/pokemon/generate-natures")
+async def generate_pokemon_natures(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetches all available natures from PokeAPI and randomly assigns one
+    to each Pokemon in the database.
+
+    Success:
+      200, { "message": "Successfully assigned natures", "count": N }
+
+    Failure:
+      500, { "error": "Failed to assign natures" }
+    """
+    try:
+        # 1) Load all Pokemon from DB
+        result = await db.execute(select(Pokemon))
+        pokemons: list[Pokemon] = result.scalars().all()
+
+        if not pokemons:
+            return {
+                "message": "Successfully assigned natures",
+                "count": 0,
+            }
+
+        # 2) Fetch all natures from PokeAPI
+        async with httpx.AsyncClient() as client:
+            natures = await fetch_all_natures(client)
+
+        if not natures:
+            # If we couldn't get any natures, treat as failure
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Failed to assign natures"},
+            )
+
+        # 3) Randomly assign one nature to each Pokemon
+        assigned_count = 0
+
+        for p in pokemons:
+            random_nature = random.choice(natures)
+
+            # Optionally skip if already assigned and you don't want to change
+            # but the spec doesn't say to preserve old values, so we overwrite.
+            await db.execute(
+                update(Pokemon)
+                .where(Pokemon.pokemon_id == p.pokemon_id)
+                .values(nature=random_nature)
+            )
+            assigned_count += 1
+
+        await db.commit()
+
+        return {
+            "message": "Successfully assigned natures",
+            "count": assigned_count,
+        }
+
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to assign natures"},
         )

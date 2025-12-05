@@ -70,3 +70,27 @@ async def fetch_location_name_for_pokemon(
     loc = first.get("location_area", {})
     name = loc.get("name")
     return name
+
+async def fetch_all_natures(client: httpx.AsyncClient) -> list[str]:
+    """
+    Fetches all available Pokemon natures from PokeAPI.
+
+    Returns a list of nature names, e.g. ["bold", "timid", ...].
+
+    We over-fetch with a large limit (e.g. 1000) so we don't have to
+    care about pagination, since there are only ~25 natures.
+    """
+    url = f"{POKEAPI_BASE_URL}/nature?limit=1000"
+    resp = await client.get(url, timeout=10.0)
+    resp.raise_for_status()
+    data = resp.json()
+
+    results = data.get("results", [])
+    names: list[str] = []
+
+    for item in results:
+        name = item.get("name")
+        if name:
+            names.append(name)
+
+    return names
