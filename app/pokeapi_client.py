@@ -46,7 +46,7 @@ async def fetch_location_name_for_pokemon(
 
     If there are no encounters or any error occurs, return None.
 
-    We intentionally pick the *first* location only, since the spec only
+    Intentionally pick the first location only, since the specification only
     requires a single 'location_name' per Pokemon.
     """
     if not encounters_url:
@@ -77,8 +77,8 @@ async def fetch_all_natures(client: httpx.AsyncClient) -> list[str]:
 
     Returns a list of nature names, e.g. ["bold", "timid", ...].
 
-    We over-fetch with a large limit (e.g. 1000) so we don't have to
-    care about pagination, since there are only ~25 natures.
+    Over-fetch with a large limit (e.g. 1000) to
+    avoid pagination, since there are only ~25 natures.
     """
     url = f"{POKEAPI_BASE_URL}/nature?limit=1000"
     resp = await client.get(url, timeout=10.0)

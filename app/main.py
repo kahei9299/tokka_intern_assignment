@@ -12,9 +12,15 @@ from db import engine, run_migrations, get_db
 from pokeapi_client import fetch_pokemon_list, fetch_pokemon_details, fetch_location_name_for_pokemon, fetch_all_natures
 from models import Pokemon, PokemonType
 from utils import parse_limit_offset
+from schemas import SavePokemonResponse, EnrichLocationsResponse, GenerateNaturesResponse, LocationsByTypeResponse
 
-app = FastAPI(title="Tokka Intern Pokemon Service")
+app = FastAPI(title="Tokka Intern Assignment - Pokemon Service")
 
+def bad_request(message: str) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"error": message})
+
+def server_error(message: str) -> JSONResponse:
+    return JSONResponse(status_code=500, content={"error": message})
 
 @app.on_event("startup")
 async def on_startup():
@@ -25,61 +31,9 @@ async def on_startup():
     use it to run simple database migrations.
     """
     await run_migrations()
-
-
-@app.get("/health")
-async def health_check():
-    """
-    Health endpoint.
-
-    Checks:
-    - App is running
-    - Database is reachable (simple SELECT 1)
-    """
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        db_status = "connected"
-    except Exception as e:
-        db_status = f"error: {e!s}"
-
-    return {
-        "status": "ok",
-        "db": db_status,
-    }
     
-@app.get("/debug/pokemon/list")
-async def debug_pokemon_list(
-    limit: int = Query(5, ge=1, le=50),
-    offset: int = Query(0, ge=0),
-):
-    """
-    Debug endpoint to verify we can talk to PokeAPI.
-
-    - Accepts limit & offset as query params
-    - Calls PokeAPI's /pokemon endpoint
-    - Returns a trimmed version of the JSON
-
-    Does not touch our database yet.
-    """
-    try:
-        data = await fetch_pokemon_list(limit=limit, offset=offset)
-    except Exception as e:
-        # PokeAPI failed or network issue
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to fetch from PokeAPI: {e!s}",
-        )
-
-    # Return the important bits for inspection
-    return {
-        "count": data.get("count"),
-        "next": data.get("next"),
-        "previous": data.get("previous"),
-        "results": data.get("results"),
-    }
     
-@app.get("/pokemon/save")
+@app.get("/pokemon/save", response_model=SavePokemonResponse)
 async def save_pokemon(
     limit: str | None = None,
     offset: str | None = None,
@@ -107,11 +61,7 @@ async def save_pokemon(
             max_limit=100,
         )
     except ValueError:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid limit or offset parameter"},
-        )
-    # -----------------------------------------------------------
+        return bad_request(message="Invalid limit or offset parameter")
 
     try:
         # Step 1: fetch list from PokeAPI
@@ -212,12 +162,9 @@ async def save_pokemon(
         except Exception:
             pass
 
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Failed to fetch or save Pokemon data"},
-        )
+        return server_error(message="Failed to fetch or save Pokemon data")
 
-@app.get("/pokemon/locations/enrich")
+@app.get("/pokemon/locations/enrich", response_model=EnrichLocationsResponse)
 async def enrich_pokemon_locations(
     db: AsyncSession = Depends(get_db),
 ):
@@ -236,8 +183,7 @@ async def enrich_pokemon_locations(
       500, { "error": "Failed to fetch or update Pokemon location data" }
     """
     try:
-        # 1) Get all Pokémon that have a non-null encounters URL.
-        #    (Optionally restrict to those with NULL location_name to avoid redoing work.)
+        # 1) Get all Pokémon that have a non-null location_area_encounters URL.
         result = await db.execute(
             select(Pokemon).where(
                 Pokemon.location_area_encounters.is_not(None)
@@ -293,12 +239,9 @@ async def enrich_pokemon_locations(
         except Exception:
             pass
 
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Failed to fetch or update Pokemon location data"},
-        )
-
-@app.get("/pokemon/generate-natures")
+        return server_error(message="Failed to fetch or update Pokemon location data")
+    
+@app.get("/pokemon/generate-natures", response_model=GenerateNaturesResponse)
 async def generate_pokemon_natures(
     db: AsyncSession = Depends(get_db),
 ):
@@ -329,19 +272,14 @@ async def generate_pokemon_natures(
 
         if not natures:
             # If we couldn't get any natures, treat as failure
-            return JSONResponse(
-                status_code=500,
-                content={"error": "Failed to assign natures"},
-            )
+            return server_error(message="Failed to assign natures")
 
         # 3) Randomly assign one nature to each Pokemon
         assigned_count = 0
 
         for p in pokemons:
             random_nature = random.choice(natures)
-
-            # Optionally skip if already assigned and you don't want to change
-            # but the spec doesn't say to preserve old values, so we overwrite.
+            
             await db.execute(
                 update(Pokemon)
                 .where(Pokemon.pokemon_id == p.pokemon_id)
@@ -362,12 +300,9 @@ async def generate_pokemon_natures(
         except Exception:
             pass
 
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Failed to assign natures"},
-        )
+        return server_error(message="Failed to assign natures")
 
-@app.get("/pokemon/locations/by-type/{type}")
+@app.get("/pokemon/locations/by-type/{type}", response_model=LocationsByTypeResponse)
 async def get_locations_by_type(
     type: str,
     limit: str | None = None,
@@ -406,11 +341,7 @@ async def get_locations_by_type(
             max_limit=50,
         )
     except ValueError:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid Pokemon type, limit, or offset parameter"},
-        )
-    # ------------------------------------------------
+        return bad_request(message="Invalid Pokemon type, limit, or offset parameter")
 
     try:
         # 1) Validate that this type exists in our data at all.
@@ -421,10 +352,7 @@ async def get_locations_by_type(
         exists_result = await db.execute(exists_stmt)
         type_count = exists_result.scalar_one() or 0
         if type_count == 0:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Invalid Pokemon type, limit, or offset parameter"},
-            )
+            return bad_request(message="Invalid Pokemon type, limit, or offset parameter")
 
         # 2) Compute total_locations = number of distinct location_name
         total_stmt = (
@@ -479,7 +407,4 @@ async def get_locations_by_type(
 
     except Exception:
         # Any unexpected DB failure → spec-compliant 500
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Failed to fetch location data"},
-        )
+        return server_error(message="Failed to fetch location data")
